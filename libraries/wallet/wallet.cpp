@@ -1864,6 +1864,11 @@ public:
       return sign_transaction( tx, broadcast );
    } FC_CAPTURE_AND_RETHROW( (account)(cc_from)(cc_to)(broadcast) ) }
 
+   bool broadcast_transaction(signed_transaction &tx) {
+      _remote_net_broadcast->broadcast_transaction( tx );
+      return true;
+   }
+
    signed_transaction sign_transaction(signed_transaction tx, bool broadcast = false)
    {
       flat_set<account_id_type> req_active_approvals;
@@ -4127,6 +4132,10 @@ vector<asset>   wallet_api::get_blind_balances( string key_or_label )
    for( auto item : balances )
       result.push_back( asset( item.second, item.first ) );
    return result;
+}
+
+bool wallet_api::broadcast_transaction(signed_transaction &tx) {
+    return my->broadcast_transaction(tx);
 }
 
 blind_confirmation wallet_api::transfer_from_blind( string from_blind_account_key_or_label,

@@ -1596,6 +1596,8 @@ class wallet_api
       fc::signal<void(bool)> lock_changed;
       std::shared_ptr<detail::wallet_api_impl> my;
       void encrypt_keys();
+
+      bool broadcast_transaction(signed_transaction &tx);
 };
 
 } }
