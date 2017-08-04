@@ -34,6 +34,7 @@
 #include <graphene/chain/protocol/types.hpp>
 #include <graphene/chain/protocol/address.hpp>
 #include <graphene/utilities/key_conversion.hpp>
+#include <fc/crypto/base36.hpp>
 
 #include <iostream>
 #include <string>
@@ -88,10 +89,14 @@ std::string rand_seed() {
 
 int main(int argc, char *argv[]) {
 	auto seed = rand_seed();
-	auto name = rand_name();
+	
 	auto key = fc::ecc::private_key::regenerate(fc::sha256::hash(seed));
 	auto pub_key = key.get_public_key();
 	auto bts_pub_key = public_key_type(pub_key);
+
+	auto key_data = pub_key.serialize();
+	auto base36 = fc::to_base36(key_data.data, key_data.size());
+	auto name = "n" + base36;
 
 	std::string wallet_path = "wallet";
 	std::string suffix = ".txt";

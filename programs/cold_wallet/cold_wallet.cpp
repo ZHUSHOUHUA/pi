@@ -29,14 +29,13 @@
 #include <graphene/utilities/key_conversion.hpp>
 #include <graphene/wallet/wallet.hpp>
 #include <fc/crypto/sha256.hpp>
+#include <fc/crypto/base36.hpp>
 #include <fstream>
 #include <string>
 #include <stdio.h>
 
 #define CHAIN_ID "ae471be89b3509bf7474710dda6bf35d893387bae70402b54b616d72b83bc5a4"
 #define SERVER_ENDPOINT "ws://cold.pi-const.com:8010"
-// #define CHAIN_ID "c44d95437b8a8c3114576396121e711aee5564e8542bdcee1ead48f21b18a9a7"
-// #define SERVER_ENDPOINT "ws://54.255.236.162:8050"
 
 using namespace graphene::app;
 using namespace graphene::chain;
@@ -68,6 +67,45 @@ void list_account_balances(wallet_api& api, const std::string &account_name) {
     }
 }
 
+bool is_public_key(const std::string &key_str) {
+    try {
+        auto pub_key = public_key_type(key_str);
+        if (pub_key == public_key_type()) {
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+vector<account_id_type> get_registered_name_by_key(wallet_api& api, public_key_type key) {
+    return api.get_key_references(key);
+}
+
+public_key_type get_public_key_by_name(const std::string &name) {
+    if (name.size() <= 2) {
+        return public_key_type();
+    }
+    if (name[0] != 'n') {
+        return public_key_type();
+    }
+    try {
+        string base36(name.begin() + 1, name.end());
+        auto bdata = fc::from_base36(base36);
+        fc::ecc::public_key_data bkey ;
+        if (bdata.size() != bkey.size()) {
+            return public_key_type();
+        }
+        memcpy(bkey.data, bdata.data(), sizeof(bkey));
+        auto pub_key = fc::ecc::public_key(bkey);
+        return public_key_type(pub_key);
+    } catch (...) {
+        return public_key_type();
+    }
+}
+
+
 bool transfer(
         wallet_api& api, 
         const std::string &sign_key,
@@ -97,6 +135,50 @@ bool transfer(
         op.memo->from = from_account.options.memo_key;
         op.memo->to = to_account.options.memo_key;
         op.memo->set_message(*pri_key, to_account.options.memo_key, memo);
+    }
+
+    signed_transaction tx;
+    tx.operations.emplace_back(op);
+    set_expiration(api, tx);
+    set_tx_fees(api, tx);
+    tx.validate();
+    fc::sha256 chain_id;
+    from_variant(CHAIN_ID, chain_id);
+    tx.sign(*pri_key, chain_id_type(CHAIN_ID));
+    api.broadcast_transaction(tx);
+
+    return true;
+}
+
+bool create_account_by_transfer(
+        wallet_api& api, 
+        const std::string &sign_key,
+        const std::string &from, 
+        public_key_type to, 
+        const std::string &amount, 
+        const std::string &symbol, 
+        const std::string &memo) {
+
+    fc::optional<fc::ecc::private_key> pri_key = wif_to_key(sign_key);
+    if (!pri_key) {
+        return false;
+    }
+
+    account_create_by_transfer_operation op;
+
+    account_object from_account = api.get_account(from);
+    // account_object to_account = api.get_account(to);
+    fc::optional<asset_object> asset_obj = api.get_asset(symbol);
+
+    op.from = from_account.id;
+    op.account_key = to;
+    op.amount = asset_obj->amount_from_string(amount);
+
+    if (memo.size()) {
+        op.memo = memo_data();
+        op.memo->from = from_account.options.memo_key;
+        op.memo->to = to;
+        op.memo->set_message(*pri_key, to, memo);
     }
 
     signed_transaction tx;
@@ -153,33 +235,92 @@ int main( int argc, char** argv )
         FC_ASSERT( remote_api->login( wdata.ws_user, wdata.ws_password ) );
         auto wapi_ptr = std::make_shared<wallet_api>( wdata, remote_api );
 
-
-        try {
-            auto account_obj = wapi_ptr->get_account(name);
-        } catch (const fc::exception& e) {
-            fprintf(stderr, "user: %s not registered.\n", name.c_str());
-            return 0;
-        }
-
         if (string(argv[2]) == "check") {
+            try {
+                auto account_obj = wapi_ptr->get_account(name);
+            } catch (const fc::exception& e) {
+                fprintf(stderr, "user: %s not registered.\n", name.c_str());
+                return 0;
+            }            
             list_account_balances(*wapi_ptr, name);
+            return 0;
         } else if (string(argv[2]) == "transfer") {
             string memo = "";
             if (argc == 7) {
                 memo = argv[6];
             }
-            transfer(*wapi_ptr, key, name, argv[3], argv[4], argv[5], memo);
-            fprintf(stderr, "transfer %s %s from %s to %s, memo %s\n", 
-                argv[4],
-                argv[5],
-                name.c_str(),
-                argv[3],
-                memo.c_str()
-            );
+
+            if (is_public_key(argv[3])) {
+                public_key_type to_pub_key(argv[3]);
+                auto to_accounts = get_registered_name_by_key(*wapi_ptr, to_pub_key);
+                if (to_accounts.size() == 0) {
+                    // not registered
+                    create_account_by_transfer(*wapi_ptr, key, name, to_pub_key, argv[4], argv[5], memo);
+                    fprintf(stderr, "+* transfer %s %s from %s to %s, memo %s\n",
+                        argv[4],
+                        argv[5],
+                        name.c_str(),
+                        argv[3],
+                        memo.c_str()
+                    );
+                    return 0;
+                } else {
+                    //registered
+                    if (to_accounts.size() > 1) {
+                        // public key is not unique for just one account, cannot transfer by public_key
+                        fprintf(
+                            stderr,
+                            "this public_key: %s is registered, "
+                            "but multi accounts are using it, please transfer by name\n",
+                            argv[3]);
+                        return 0;
+                    } else {
+                        auto acc = std::string(object_id_type(to_accounts[0]));
+                        transfer(*wapi_ptr, key, name, acc, argv[4], argv[5], memo);
+                        fprintf(stderr, "-* transfer %s %s from %s to %s, memo %s\n",
+                            argv[4],
+                            argv[5],
+                            name.c_str(),
+                            acc.c_str(),
+                            memo.c_str()
+                        );
+                        return 0;
+                    }
+                }
+            } else {
+                auto to_account_id = wapi_ptr->get_account_id2(argv[3]);
+                if (to_account_id == account_id_type()) {
+                    public_key_type to_pub_key = get_public_key_by_name(argv[3]);
+                    if (to_pub_key == public_key_type()) {
+                        fprintf(stderr, "name: %s not registered and can not be created by transfer\n", argv[3]);
+                        return 0;
+                    } else {
+                        create_account_by_transfer(*wapi_ptr, key, name, to_pub_key, argv[4], argv[5], memo);
+                        fprintf(stderr, "+ transfer %s %s from %s to %s, memo %s\n",
+                            argv[4],
+                            argv[5],
+                            name.c_str(),
+                            argv[3],
+                            memo.c_str()
+                        );
+                        return 0;
+                    }
+                } else {
+                    transfer(*wapi_ptr, key, name, argv[3], argv[4], argv[5], memo);
+                    fprintf(stderr, "- transfer %s %s from %s to %s, memo %s\n", 
+                        argv[4],
+                        argv[5],
+                        name.c_str(),
+                        argv[3],
+                        memo.c_str()
+                    );
+                    return 0;
+                }
+            }
         } else {
             fprintf(stderr, "operation: %s not support.\n", argv[2]);
+            return 0;
         }
-        return 0;
    }
    catch ( const fc::exception& e )
    {

@@ -600,6 +600,26 @@ public:
          return *rec;
       }
    }
+
+   account_id_type get_account_id2(string account_name_or_id) const {
+      if ( account_name_or_id.size() == 0 ) {
+          return account_id_type();
+      }
+      if ( auto id = maybe_id<account_id_type>(account_name_or_id) )
+      {
+          return *id;
+      } else {
+         auto ids = _remote_db->lookup_account_names({account_name_or_id});
+         if (ids.size() > 0) {
+             auto rec = ids.front();
+             if (rec && rec->name == account_name_or_id) {
+                 return rec->id;
+             }
+         }
+          return account_id_type();
+      }
+   }
+
    account_id_type get_account_id(string account_name_or_id) const
    {
       return get_account(account_name_or_id).get_id();
@@ -2104,6 +2124,44 @@ public:
       return sign_transaction(tx, broadcast);
    } FC_CAPTURE_AND_RETHROW( (from)(to)(amount)(asset_symbol)(memo)(broadcast) ) }
 
+signed_transaction create_account_by_transfer(string from,
+                                  public_key_type to,
+                                  string amount,
+                                  string asset_symbol,
+                                  string memo,
+                                  bool broadcast = false) 
+   { try {
+      FC_ASSERT( !self.is_locked() );
+      fc::optional<asset_object> asset_obj = get_asset(asset_symbol);
+      FC_ASSERT(asset_obj, "Could not find asset matching ${asset}", ("asset", asset_symbol));
+
+      account_object from_account = get_account(from);
+    //   account_object to_account = get_account(to);
+      account_id_type from_id = from_account.id;
+    //   account_id_type to_id = get_account_id(to);
+
+      account_create_by_transfer_operation xfer_op;
+
+      xfer_op.from = from_id;
+      xfer_op.account_key = to;
+      xfer_op.amount = asset_obj->amount_from_string(amount);
+
+      if( memo.size() )
+         {
+            xfer_op.memo = memo_data();
+            xfer_op.memo->from = from_account.options.memo_key;
+            xfer_op.memo->to = to;
+            xfer_op.memo->set_message(get_private_key(from_account.options.memo_key),
+                                      to, memo);
+         }
+
+      signed_transaction tx;
+      tx.operations.push_back(xfer_op);
+      set_operation_fees( tx, _remote_db->get_global_properties().parameters.current_fees);
+      tx.validate();
+      return sign_transaction(tx, broadcast);
+   } FC_CAPTURE_AND_RETHROW( (from)(to)(amount)(asset_symbol)(memo)(broadcast) ) }
+
    signed_transaction issue_asset(string to_account, string amount, string symbol,
                                   string memo, bool broadcast = false)
    {
@@ -2946,6 +3004,17 @@ vector<asset> wallet_api::list_account_balances(const string& id)
    return my->_remote_db->get_account_balances(get_account(id).id, flat_set<asset_id_type>());
 }
 
+vector<account_id_type> wallet_api::get_key_references(public_key_type pub_key) {
+    auto all = my->_remote_db->get_key_references({pub_key});
+    set<account_id_type> result;
+    for (auto it : all) {
+        for (auto it1 : it) {
+            result.insert(it1);
+        }
+    }
+    return vector<account_id_type>(result.begin(), result.end());
+}
+
 vector<asset_object> wallet_api::list_assets(const string& lowerbound, uint32_t limit)const
 {
    return my->_remote_db->list_assets( lowerbound, limit );
@@ -3134,6 +3203,11 @@ asset_bitasset_data_object wallet_api::get_bitasset_data(string asset_name_or_id
 account_id_type wallet_api::get_account_id(string account_name_or_id) const
 {
    return my->get_account_id(account_name_or_id);
+}
+
+account_id_type wallet_api::get_account_id2(string account_name_or_id) const
+{
+   return my->get_account_id2(account_name_or_id);
 }
 
 asset_id_type wallet_api::get_asset_id(string asset_symbol_or_id) const
@@ -3326,6 +3400,16 @@ signed_transaction wallet_api::transfer(string from, string to, string amount,
                                         string asset_symbol, string memo, bool broadcast /* = false */)
 {
    return my->transfer(from, to, amount, asset_symbol, memo, broadcast);
+}
+
+signed_transaction wallet_api::create_account_by_transfer(string from,
+                                  public_key_type to,
+                                  string amount,
+                                  string asset_symbol,
+                                  string memo,
+                                  bool broadcast)
+{
+    return my->create_account_by_transfer(from, to, amount, asset_symbol, memo, broadcast);
 }
 signed_transaction wallet_api::create_asset(string issuer,
                                             string symbol,
